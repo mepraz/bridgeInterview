@@ -1,0 +1,174 @@
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { ArrowLeft, Bot, Mic, User, Star } from 'lucide-react';
+import { getSession } from '@/lib/session';
+import { redirect } from 'next/navigation';
+import type { TestSession, Question, User as UserType } from '@/lib/types';
+import { Button } from '@/components/ui/button';
+import Link from 'next/link';
+import { format } from 'date-fns';
+import { Separator } from '@/components/ui/separator';
+import clientPromise from '@/lib/mongodb';
+import { Collection, ObjectId } from 'mongodb';
+
+async function getTestSessionsCollection(): Promise<Collection<Omit<TestSession, 'id'>>> {
+  const client = await clientPromise;
+  const db = client.db("pte_ace");
+  return db.collection<Omit<TestSession, 'id'>>('testSessions');
+}
+
+async function getQuestionsCollection(): Promise<Collection<Omit<Question, 'id'>>> {
+  const client = await clientPromise;
+  const db = client.db("pte_ace");
+  return db.collection<Omit<Question, 'id'>>('questions');
+}
+
+async function getUsersCollection(): Promise<Collection<Omit<UserType, 'id'>>> {
+    const client = await clientPromise;
+    const db = client.db("pte_ace");
+    return db.collection<Omit<UserType, 'id'>>('users');
+}
+
+async function getTestSession(sessionId: string): Promise<(TestSession & { student?: UserType }) | null> {
+  if (!ObjectId.isValid(sessionId)) return null;
+  const collection = await getTestSessionsCollection();
+  const session = await collection.findOne({ _id: new ObjectId(sessionId) });
+  if (!session) return null;
+
+  const usersCollection = await getUsersCollection();
+  const student = await usersCollection.findOne({ _id: new ObjectId(session.studentId) });
+
+  return { 
+      ...session, 
+      id: session._id.toString(),
+      student: student ? { ...student, id: student._id.toString() } : undefined
+    };
+}
+
+async function getQuestions(questionIds: string[]): Promise<Map<string, Question>> {
+    const collection = await getQuestionsCollection();
+    if (questionIds.length === 0) return new Map();
+    const objectIds = questionIds.map(id => new ObjectId(id));
+    const questions = await collection.find({ _id: { $in: objectIds } }).toArray();
+    const map = new Map<string, Question>();
+    questions.forEach(q => map.set(q._id.toString(), { ...q, id: q._id.toString() }));
+    return map;
+}
+
+
+export default async function AdminResultsPage({ params }: { params: { sessionId: string } }) {
+  const sessionData = await getSession();
+  if (!sessionData.isLoggedIn || sessionData.role !== 'admin') {
+    redirect('/login?admin=true');
+  }
+
+  const testSession = await getTestSession(params.sessionId);
+
+  if (!testSession) {
+    return (
+      <div className="container mx-auto py-12 text-center">
+        <h1 className="text-2xl font-bold">Test Session Not Found</h1>
+        <p className="text-muted-foreground">The requested session does not exist.</p>
+        <Button asChild variant="link" className="mt-4">
+            <Link href="/admin/test-sessions">
+                <ArrowLeft className="mr-2" />
+                Back to Sessions List
+            </Link>
+        </Button>
+      </div>
+    );
+  }
+  
+  const questionIds = testSession.answers.map(a => a.questionId);
+  const questionsMap = await getQuestions(questionIds);
+
+  return (
+    <div className="container mx-auto py-8 sm:py-12">
+        <div className="mb-6">
+            <Button asChild variant="outline">
+                <Link href="/admin/test-sessions">
+                    <ArrowLeft className="mr-2" />
+                    Back to Sessions List
+                </Link>
+            </Button>
+        </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <div className="lg:col-span-2 space-y-6">
+            <Card>
+                <CardHeader>
+                    <CardTitle className="text-3xl font-headline">Mock Test Results for {testSession.student?.name}</CardTitle>
+                    <CardDescription>
+                        Test taken on {format(new Date(testSession.startedAt), 'MMMM d, yyyy, h:mm a')}
+                    </CardDescription>
+                </CardHeader>
+            </Card>
+
+            {testSession.answers.map((answer, index) => {
+                const question = questionsMap.get(answer.questionId);
+                return (
+                    <Card key={index}>
+                        <CardHeader>
+                            <div className="flex justify-between items-start">
+                                <div>
+                                    <CardTitle>Question {index + 1}</CardTitle>
+                                    <CardDescription className="mt-2 text-base">{question?.text}</CardDescription>
+                                </div>
+                                <Badge variant={answer.score && answer.score > 0 ? 'default' : 'secondary'} className={`text-lg py-1 px-4 ${answer.score && answer.score > 0 ? 'bg-accent text-accent-foreground' : ''}`}>
+                                    <Star className="mr-2 text-yellow-500" />
+                                    {answer.score?.toFixed(1) || 'N/A'}
+                                </Badge>
+                            </div>
+                        </CardHeader>
+                        <CardContent>
+                            <Separator className="my-4" />
+                            <div className="space-y-4">
+                                <div>
+                                    <h4 className="font-semibold flex items-center mb-2"><Mic className="mr-2" /> Student's Answer</h4>
+                                    <p className="text-muted-foreground italic">"{answer.transcript || 'No transcript available.'}"</p>
+                                </div>
+                                <div>
+                                    <h4 className="font-semibold flex items-center mb-2"><Bot className="mr-2" /> AI Feedback</h4>
+                                    <p className="text-muted-foreground">{answer.feedback || 'No feedback available.'}</p>
+                                </div>
+                            </div>
+                        </CardContent>
+                    </Card>
+                );
+            })}
+        </div>
+        <div className="space-y-6">
+            <Card>
+                <CardHeader className="text-center">
+                    <CardDescription>Overall Score</CardDescription>
+                    <CardTitle className="text-5xl font-headline">
+                        {testSession.overallScore?.toFixed(1) || 'N/A'} / 10
+                    </CardTitle>
+                </CardHeader>
+            </Card>
+
+            <Card>
+                <CardHeader>
+                    <CardTitle className="flex items-center"><User className="mr-2" /> Teacher's Feedback</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                     <p className="text-muted-foreground text-sm">
+                        As an admin, you can provide final feedback to the student here.
+                     </p>
+                     {/* Teacher feedback form can be added here */}
+                </CardContent>
+            </Card>
+
+        </div>
+      </div>
+    </div>
+  );
+}
